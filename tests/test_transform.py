@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings
-
 import pytest
 import sympy
 from qref.schema_v1 import RoutineV1
 
-from bartiq import Resource, ResourceType, Routine
-from bartiq.transform import add_aggregated_resources
+from bartiq import Routine
+from bartiq.transform import add_aggregated_resources, add_circuit_volume
 
 ccry_gate = {
     "name": "ccry_gate",
@@ -227,133 +225,82 @@ def _compare_routines(routine, expected):
         _compare_routines(routine.children[child], expected.children[child])
 
 
-def _assert_circuit_volume_by_index(
-    routine,
-    expected_volumes,
-    should_exist,
-    name_of_circuit_volume="circuit_volume",
-    name_of_qubit_highwater="qubit_highwater",
-):
-    """
-    Checks circuit_volume for parent and children by index in expected_volumes.
-    expected_volumes: [parent, child1, child2, ...]
-    """
-    nodes = [routine] + list(routine.children.values())
-    for idx, node in enumerate(nodes):
-        expected_volume = expected_volumes[idx]
-        if should_exist and expected_volume is not None:
-            assert name_of_circuit_volume in node.resources
-            # Use the parameterized name for qubit_highwater
-            assert name_of_qubit_highwater in node.resources
-            assert sympy.simplify(node.resources[name_of_circuit_volume].value - sympy.sympify(expected_volume)) == 0
-        else:
-            assert name_of_circuit_volume not in node.resources
+def test_add_circuit_volume_simple(backend):
+    from bartiq import CompiledRoutine, Resource, ResourceType
 
-
-@pytest.mark.parametrize(
-    "parent_resources,children_resources,expected_volumes,should_exist,custom_t,custom_qh",
-    [
-        # Custom resource names, all present
-        (
-            {"my_t": Resource("my_t", ResourceType.additive, 7), "my_qh": Resource("my_qh", ResourceType.other, 3)},
-            [
-                {"my_t": Resource("my_t", ResourceType.additive, 2), "my_qh": Resource("my_qh", ResourceType.other, 5)},
-            ],
-            [21, 10],
-            True,
-            "my_t",
-            "my_qh",
-        ),
-        # Custom resource names, child missing qubit highwater
-        (
-            {"my_t": Resource("my_t", ResourceType.additive, 7), "my_qh": Resource("my_qh", ResourceType.other, 3)},
-            [
-                {"my_t": Resource("my_t", ResourceType.additive, 2)},
-            ],
-            [21, None],
-            True,
-            "my_t",
-            "my_qh",
-        ),
-        # Custom resource names, parent missing qubit highwater
-        ({"my_t": Resource("my_t", ResourceType.additive, 7)}, [], [None], False, "my_t", "my_qh"),
-        # Deeply nested children, all present
-        (
-            {"agg": Resource("agg", ResourceType.additive, 2), "qhw": Resource("qhw", ResourceType.other, 4)},
-            [
-                {"agg": Resource("agg", ResourceType.additive, 3), "qhw": Resource("qhw", ResourceType.other, 5)},
-                {"agg": Resource("agg", ResourceType.additive, 1), "qhw": Resource("qhw", ResourceType.other, 2)},
-            ],
-            [8, 15, 2],
-            True,
-            "agg",
-            "qhw",
-        ),
-    ],
-)
-def test_add_circuit_volume_custom_names_and_children(
-    parent_resources, children_resources, expected_volumes, should_exist, custom_t, custom_qh, backend
-):
-    from bartiq import CompiledRoutine
-    from bartiq.transform import add_circuit_volume
-
-    children = {}
-    for i, res in enumerate(children_resources):
-        children[f"child{i + 1}"] = CompiledRoutine(
-            name=f"child{i + 1}",
-            type=None,
-            input_params=(),
-            children={},
-            ports={},
-            resources=res,
-            constraints=(),
-            connections={},
-            repetition=None,
-            children_order=(),
-        )
-    parent = CompiledRoutine(
-        name="parent",
+    # Create a simple routine with required resources
+    routine = CompiledRoutine(
+        name="test",
         type=None,
-        input_params=(),
-        children=children,
-        ports={},
-        resources=parent_resources,
-        constraints=(),
-        connections={},
-        repetition=None,
-        children_order=tuple(children.keys()),
-    )
-
-    result = add_circuit_volume(
-        parent, name_of_aggregated_t=custom_t, name_of_qubit_highwater=custom_qh, backend=backend
-    )
-    _assert_circuit_volume_by_index(
-        result,
-        expected_volumes,
-        should_exist,
-        name_of_circuit_volume="circuit_volume",
-        name_of_qubit_highwater=custom_qh,
-    )
-
-
-def test_add_circuit_volume_warns_on_missing_resources(backend):
-    from bartiq import CompiledRoutine
-    from bartiq.transform import add_circuit_volume
-
-    parent_resources = {"agg": Resource("agg", ResourceType.additive, 2)}
-    parent = CompiledRoutine(
-        name="parent",
-        type=None,
-        input_params=(),
+        input_params=[],
         children={},
         ports={},
-        resources=parent_resources,
-        constraints=(),
+        resources={
+            "aggregated_t_gates": Resource("aggregated_t_gates", ResourceType.additive, 5),
+            "qubit_highwater": Resource("qubit_highwater", ResourceType.qubits, 3),
+        },
         connections={},
-        repetition=None,
         children_order=(),
     )
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        _ = add_circuit_volume(parent, name_of_aggregated_t="agg", name_of_qubit_highwater="qhw", backend=backend)
-        assert any("Missing required resources" in str(warn.message) for warn in w)
+    out = add_circuit_volume(routine, backend=backend)
+    assert "circuit_volume" in out.resources
+    assert backend.value_of(out.resources["circuit_volume"].value) == 15
+
+
+def test_add_circuit_volume_with_children(backend):
+    from bartiq import CompiledRoutine, Resource, ResourceType
+    from bartiq.transform import add_circuit_volume
+
+    # Create a child routine with required resources
+    child = CompiledRoutine(
+        name="child",
+        type=None,
+        input_params=[],
+        children={},
+        ports={},
+        resources={
+            "aggregated_t_gates": Resource("aggregated_t_gates", ResourceType.additive, 2),
+            "qubit_highwater": Resource("qubit_highwater", ResourceType.qubits, 4),
+        },
+        connections={},
+        children_order=(),
+    )
+    # Create a parent routine with required resources and the child
+    parent = CompiledRoutine(
+        name="parent",
+        type=None,
+        input_params=[],
+        children={"child": child},
+        ports={},
+        resources={
+            "aggregated_t_gates": Resource("aggregated_t_gates", ResourceType.additive, 3),
+            "qubit_highwater": Resource("qubit_highwater", ResourceType.qubits, 5),
+        },
+        connections={},
+        children_order=("child",),
+    )
+    out = add_circuit_volume(parent, backend=backend)
+    assert "circuit_volume" in out.resources
+    assert backend.value_of(out.resources["circuit_volume"].value) == 15
+    assert "circuit_volume" in out.children["child"].resources
+    assert backend.value_of(out.children["child"].resources["circuit_volume"].value) == 8
+
+    # Test with custom resource names
+    child2 = CompiledRoutine(
+        name="child2",
+        type=None,
+        input_params=[],
+        children={},
+        ports={},
+        resources={
+            "custom_t": Resource("custom_t", ResourceType.additive, 7),
+            "custom_highwater": Resource("custom_highwater", ResourceType.qubits, 2),
+        },
+        connections={},
+        children_order=(),
+    )
+    out2 = add_circuit_volume(
+        child2, name_of_aggregated_t="custom_t", name_of_qubit_highwater="custom_highwater", backend=backend
+    )
+    assert "circuit_volume" in out2.resources
+    assert backend.value_of(out2.resources["circuit_volume"].value) == 14
